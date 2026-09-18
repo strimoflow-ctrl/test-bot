@@ -1,12 +1,13 @@
 """
 Premium High-Performance Lookup Telegram Bot for Railway Deployment.
 Features:
-- Real-Time Channel Leave Detection (Instantly alerts user in private DM if they leave the channel)
-- Dynamic Multi-Channel Force-Sub via ENV (supports any number of channels, checks before every action)
-- Animated Loading Progress Bar (looks like cyber terminal animation while fetching)
-- Automatic Data Sanitization (cleans addresses, removes watermarks, duplicates, spam tags)
-- Robust Phone Normalization (+91, spaces, dashes, parentheses, zero prefix)
-- Auto-Resolve 409 Polling Conflicts
+- Smart Channel Leave Detection: Only asks to join the SPECIFIC channel(s) the user left or hasn't joined.
+- Dynamic Multi-Channel Force-Sub via ENV (supports any number of channels).
+- Seamless Verification: On 'Verify & Continue', instantly replaces the join message with the full clean Welcome screen.
+- Animated Cyber Loading Progress Bar while fetching records.
+- Automatic Data Sanitization (cleans addresses, removes watermarks, duplicates, spam tags).
+- Robust Phone Normalization (+91, spaces, dashes, parentheses, zero prefix).
+- Conflict Free (auto-resets stuck webhooks).
 """
 
 import os
@@ -66,26 +67,41 @@ def check_user_membership(user_id):
                 unjoined.append(ch)
         except Exception as e:
             print(f"[WARN] Error checking membership in {ch}: {e}")
+            # If bot has permissions issue, avoid blocking user permanently
             pass
 
     return len(unjoined) == 0, unjoined
 
 
 def make_force_sub_markup(unjoined_channels):
-    """Generates inline buttons for unjoined channels + Verify button."""
+    """Generates inline buttons for ONLY the channels the user has NOT joined."""
     markup = types.InlineKeyboardMarkup(row_width=1)
     for idx, ch in enumerate(unjoined_channels, 1):
         clean_name = ch.replace("@", "")
         url = f"https://t.me/{clean_name}"
-        markup.add(types.InlineKeyboardButton(f"📢 Join Channel {idx} ({ch})", url=url))
+        markup.add(types.InlineKeyboardButton(f"📢 Join Channel ({ch})", url=url))
 
     markup.add(types.InlineKeyboardButton("🔄 Verify & Continue", callback_data="check_join"))
     return markup
 
 
+def get_welcome_text():
+    """Clean standard Welcome text."""
+    return (
+        "⚡ <b>WELCOME TO NUMBER INTELLIGENCE BOT</b> ⚡\n"
+        "──────────────────────────\n"
+        "Send any 10-digit Indian mobile number to look up real-time details:\n\n"
+        "• <code>6392551618</code>\n"
+        "• <code>+91 63925 51618</code>\n"
+        "• <code>91-6392551618</code>\n"
+        "• <code>06392551618</code>\n\n"
+        "🛡️ <i>Auto-cleaning enabled: spaces, +91, dashes are stripped automatically!</i>"
+    )
+
+
 # ─────────────────────────────────────────────────────────────
 # REAL-TIME CHANNEL LEAVE DETECTION
-# Triggers immediately when a user leaves or unjoins any channel
+# Triggers immediately when a user leaves any channel
 # ─────────────────────────────────────────────────────────────
 @bot.chat_member_handler()
 def handle_chat_member_update(update: types.ChatMemberUpdated):
@@ -94,28 +110,105 @@ def handle_chat_member_update(update: types.ChatMemberUpdated):
         new_status = update.new_chat_member.status
         user = update.new_chat_member.user
 
-        # If user left or was banned/removed
+        # If user left or was removed from channel
         if old_status in ["member", "administrator", "restricted"] and new_status in ["left", "kicked"]:
-            chat_title = update.chat.title or update.chat.username or "our channel"
-            channels = get_required_channels()
+            chat_title = update.chat.title or update.chat.username or "channel"
+            
+            # Check exactly which channels are unjoined right now
+            is_joined, unjoined = check_user_membership(user.id)
+            if is_joined:
+                return
 
-            # Alert user immediately in private DM
-            alert_text = (
-                f"🚨 <b>Alert! You left {html.escape(str(chat_title))}!</b>\n\n"
-                "Your bot access has been <b>suspended</b> because you left the official channel.\n"
-                "To unlock the bot again, please re-join and click <b>Verify & Continue</b> below."
-            )
+            if len(unjoined) == 1:
+                alert_text = (
+                    f"🚨 <b>Alert! You left {html.escape(str(chat_title))}!</b>\n\n"
+                    f"Your bot access is paused because you are not in <b>{unjoined[0]}</b>.\n"
+                    "Please re-join this channel and click <b>Verify & Continue</b>."
+                )
+            else:
+                alert_text = (
+                    f"🚨 <b>Alert! You left {html.escape(str(chat_title))}!</b>\n\n"
+                    f"You have <b>{len(unjoined)} channels</b> pending to join.\n"
+                    "Please join all pending channels below and click <b>Verify & Continue</b>."
+                )
+
             try:
                 bot.send_message(
                     user.id,
                     alert_text,
-                    reply_markup=make_force_sub_markup(channels),
+                    reply_markup=make_force_sub_markup(unjoined),
                     parse_mode="HTML"
                 )
             except Exception as dm_err:
-                print(f"[INFO] Could not DM user {user.id} (user may have blocked bot): {dm_err}")
+                print(f"[INFO] Could not DM user {user.id}: {dm_err}")
     except Exception as e:
         print(f"[ERROR] chat_member_update error: {e}")
+
+
+@bot.message_handler(commands=["start", "help"])
+def send_welcome(message):
+    user_id = message.from_user.id
+    is_joined, unjoined = check_user_membership(user_id)
+
+    if not is_joined:
+        if len(unjoined) == 1:
+            text = (
+                "🚨 <b>Channel Membership Required!</b>\n\n"
+                f"You need to join <b>{unjoined[0]}</b> before using this bot.\n"
+                "After joining, click <b>Verify & Continue</b> below."
+            )
+        else:
+            text = (
+                "🚨 <b>Access Restricted!</b>\n\n"
+                f"You have <b>{len(unjoined)} channels</b> pending to join.\n"
+                "Please join them and click <b>Verify & Continue</b> below."
+            )
+        bot.reply_to(message, text, reply_markup=make_force_sub_markup(unjoined), parse_mode="HTML")
+        return
+
+    bot.reply_to(message, get_welcome_text(), parse_mode="HTML")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "check_join")
+def handle_verify_callback(call):
+    user_id = call.from_user.id
+    is_joined, unjoined = check_user_membership(user_id)
+
+    if is_joined:
+        bot.answer_callback_query(call.id, "✅ Verified successfully!", show_alert=False)
+        try:
+            # Instantly transform the message into the full Welcome screen and remove all buttons
+            bot.edit_message_text(
+                get_welcome_text(),
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+    else:
+        # User still has pending channels
+        pending_str = ", ".join(unjoined)
+        bot.answer_callback_query(
+            call.id, 
+            f"❌ You haven't joined: {pending_str}\nPlease join to continue!", 
+            show_alert=True
+        )
+        try:
+            text = (
+                "⚠️ <b>Action Incomplete!</b>\n\n"
+                f"You still need to join: <b>{pending_str}</b>\n"
+                "Please join below and click <b>Verify & Continue</b>."
+            )
+            bot.edit_message_text(
+                text,
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                reply_markup=make_force_sub_markup(unjoined),
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
 
 
 def clean_phone(val):
@@ -189,72 +282,18 @@ def extract_clean_records(data):
     return cleaned
 
 
-@bot.message_handler(commands=["start", "help"])
-def send_welcome(message):
-    user_id = message.from_user.id
-    is_joined, unjoined = check_user_membership(user_id)
-
-    if not is_joined:
-        text = (
-            "🚨 <b>Access Restricted!</b>\n\n"
-            "To use this bot, you must join our official channel(s) first.\n"
-            "After joining, click the <b>'Verify & Continue'</b> button below."
-        )
-        bot.reply_to(message, text, reply_markup=make_force_sub_markup(unjoined), parse_mode="HTML")
-        return
-
-    text = (
-        "⚡ <b>WELCOME TO NUMBER INTELLIGENCE BOT</b> ⚡\n"
-        "──────────────────────────\n"
-        "Send any 10-digit Indian mobile number to look up real-time details:\n\n"
-        "• <code>6392551618</code>\n"
-        "• <code>+91 63925 51618</code>\n"
-        "• <code>91-6392551618</code>\n"
-        "• <code>06392551618</code>\n\n"
-        "🛡️ <i>Auto-cleaning enabled: spaces, +91, dashes are stripped automatically!</i>"
-    )
-    bot.reply_to(message, text, parse_mode="HTML")
-
-
-@bot.callback_query_handler(func=lambda call: call.data == "check_join")
-def handle_verify_callback(call):
-    user_id = call.from_user.id
-    is_joined, unjoined = check_user_membership(user_id)
-
-    if is_joined:
-        bot.answer_callback_query(call.id, "✅ Verified successfully! You can now use the bot.", show_alert=True)
-        try:
-            bot.edit_message_text(
-                "✅ <b>Verification Successful!</b>\n\nSend me any mobile number to start searching.",
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                parse_mode="HTML"
-            )
-        except Exception:
-            pass
-    else:
-        bot.answer_callback_query(call.id, "❌ You haven't joined all channels yet! Please join to continue.", show_alert=True)
-        try:
-            bot.edit_message_reply_markup(
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                reply_markup=make_force_sub_markup(unjoined)
-            )
-        except Exception:
-            pass
-
-
 @bot.message_handler(func=lambda msg: True)
 def handle_number(message):
     user_id = message.from_user.id
     
-    # 1. Enforce Channel Membership before EVERY search
+    # 1. Check membership before processing any search query
     is_joined, unjoined = check_user_membership(user_id)
     if not is_joined:
+        pending_str = ", ".join(unjoined)
         text = (
             "⚠️ <b>Channel Membership Required!</b>\n\n"
-            "You have either left or not joined our required channel(s).\n"
-            "Please join them and click <b>Verify & Continue</b>."
+            f"You must be in <b>{pending_str}</b> to search numbers.\n"
+            "Please join below and click <b>Verify & Continue</b>."
         )
         bot.reply_to(message, text, reply_markup=make_force_sub_markup(unjoined), parse_mode="HTML")
         return
@@ -275,7 +314,7 @@ def handle_number(message):
         bot.reply_to(message, "⚠️ API_URL is not configured in environment.", parse_mode="HTML")
         return
 
-    # 2. Cyber Animated Loading Progress Message
+    # 2. Animated Progress Bar
     loading_frames = [
         "<code>[■□□□□□□□□□] 10%</code>\n🛡️ <b>VALIDATING NUMBER...</b>",
         "<code>[■■■■□□□□□□] 40%</code>\n🔍 <b>SCANNING DATABASE...</b>",
@@ -372,7 +411,6 @@ if __name__ == "__main__":
     if not BOT_TOKEN:
         print("[ERROR] BOT_TOKEN is missing. Set it in .env or Railway environment variables.")
     else:
-        # Reset any stuck webhooks to prevent 409 Conflict
         try:
             bot.remove_webhook()
             time.sleep(1)
@@ -382,7 +420,6 @@ if __name__ == "__main__":
         channels = get_required_channels()
         print(f"🤖 Bot starting... Active Force-Sub Channels: {channels or 'None'}")
         
-        # Include chat_member updates in polling so bot listens to join/leave events
         bot.infinity_polling(
             timeout=25, 
             long_polling_timeout=20,
