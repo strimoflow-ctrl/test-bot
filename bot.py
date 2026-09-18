@@ -1,11 +1,12 @@
 """
 Premium High-Performance Lookup Telegram Bot for Railway Deployment.
 Features:
+- Real-Time Channel Leave Detection (Instantly alerts user in private DM if they leave the channel)
 - Dynamic Multi-Channel Force-Sub via ENV (supports any number of channels, checks before every action)
 - Animated Loading Progress Bar (looks like cyber terminal animation while fetching)
 - Automatic Data Sanitization (cleans addresses, removes watermarks, duplicates, spam tags)
 - Robust Phone Normalization (+91, spaces, dashes, parentheses, zero prefix)
-- Premium Cyber/Terminal UI Aesthetic with inline buttons
+- Auto-Resolve 409 Polling Conflicts
 """
 
 import os
@@ -25,7 +26,7 @@ API_URL = os.environ.get(
     "https://nmdllpezcocquamhgpmb.supabase.co/functions/v1/lookup?number="
 ).strip()
 
-# Comma-separated channel usernames or IDs, e.g. "@mychannel1, @mychannel2" or "-100123456789"
+# Comma-separated channel usernames or IDs, e.g. "@mychannel1, @mychannel2"
 CHANNELS_RAW = os.environ.get("FORCE_CHANNELS", "").strip()
 
 if not BOT_TOKEN:
@@ -61,12 +62,10 @@ def check_user_membership(user_id):
     for ch in channels:
         try:
             member = bot.get_chat_member(ch, user_id)
-            # Valid statuses: creator, administrator, member, restricted (if can read)
             if member.status not in ["creator", "administrator", "member", "restricted"]:
                 unjoined.append(ch)
         except Exception as e:
             print(f"[WARN] Error checking membership in {ch}: {e}")
-            # If bot is not admin or channel username is invalid, avoid blocking user
             pass
 
     return len(unjoined) == 0, unjoined
@@ -84,8 +83,42 @@ def make_force_sub_markup(unjoined_channels):
     return markup
 
 
+# ─────────────────────────────────────────────────────────────
+# REAL-TIME CHANNEL LEAVE DETECTION
+# Triggers immediately when a user leaves or unjoins any channel
+# ─────────────────────────────────────────────────────────────
+@bot.chat_member_handler()
+def handle_chat_member_update(update: types.ChatMemberUpdated):
+    try:
+        old_status = update.old_chat_member.status
+        new_status = update.new_chat_member.status
+        user = update.new_chat_member.user
+
+        # If user left or was banned/removed
+        if old_status in ["member", "administrator", "restricted"] and new_status in ["left", "kicked"]:
+            chat_title = update.chat.title or update.chat.username or "our channel"
+            channels = get_required_channels()
+
+            # Alert user immediately in private DM
+            alert_text = (
+                f"🚨 <b>Alert! You left {html.escape(str(chat_title))}!</b>\n\n"
+                "Your bot access has been <b>suspended</b> because you left the official channel.\n"
+                "To unlock the bot again, please re-join and click <b>Verify & Continue</b> below."
+            )
+            try:
+                bot.send_message(
+                    user.id,
+                    alert_text,
+                    reply_markup=make_force_sub_markup(channels),
+                    parse_mode="HTML"
+                )
+            except Exception as dm_err:
+                print(f"[INFO] Could not DM user {user.id} (user may have blocked bot): {dm_err}")
+    except Exception as e:
+        print(f"[ERROR] chat_member_update error: {e}")
+
+
 def clean_phone(val):
-    """Normalizes any phone input into a standard 10-digit Indian mobile number."""
     if not val:
         return ""
     digits = re.sub(r"\D", "", str(val).strip())
@@ -107,10 +140,6 @@ def clean_phone(val):
 
 
 def extract_clean_records(data):
-    """
-    Unwraps deeply nested response JSON, scrubs watermarks,
-    formats address, and deduplicates identical records.
-    """
     cur = data
     while isinstance(cur, dict):
         if "result" in cur:
@@ -143,7 +172,6 @@ def extract_clean_records(data):
             continue
         seen.add(uid)
 
-        # Scrub formatting from address
         if addr:
             addr = re.sub(r"[!]+", ", ", addr)
             addr = re.sub(r"\s+", " ", addr).strip(", ")
@@ -258,9 +286,8 @@ def handle_number(message):
     loading_msg = bot.reply_to(message, loading_frames[0], parse_mode="HTML")
     t0 = time.time()
 
-    # Async progress update simulation
     try:
-        time.sleep(0.5)
+        time.sleep(0.4)
         bot.edit_message_text(loading_frames[1], chat_id=message.chat.id, message_id=loading_msg.message_id, parse_mode="HTML")
     except Exception:
         pass
@@ -345,6 +372,19 @@ if __name__ == "__main__":
     if not BOT_TOKEN:
         print("[ERROR] BOT_TOKEN is missing. Set it in .env or Railway environment variables.")
     else:
+        # Reset any stuck webhooks to prevent 409 Conflict
+        try:
+            bot.remove_webhook()
+            time.sleep(1)
+        except Exception:
+            pass
+
         channels = get_required_channels()
         print(f"🤖 Bot starting... Active Force-Sub Channels: {channels or 'None'}")
-        bot.infinity_polling(timeout=25, long_polling_timeout=20)
+        
+        # Include chat_member updates in polling so bot listens to join/leave events
+        bot.infinity_polling(
+            timeout=25, 
+            long_polling_timeout=20,
+            allowed_updates=["message", "callback_query", "chat_member"]
+        )
