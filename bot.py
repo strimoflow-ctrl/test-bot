@@ -1,6 +1,11 @@
 """
-Lightweight Clean Lookup Telegram Bot for Railway Deployment.
-Cleans raw JSON, removes spam/tags/watermarks, and formats beautifully without any parse errors.
+Premium High-Performance Lookup Telegram Bot for Railway Deployment.
+Features:
+- Dynamic Multi-Channel Force-Sub via ENV (supports any number of channels, checks before every action)
+- Animated Loading Progress Bar (looks like cyber terminal animation while fetching)
+- Automatic Data Sanitization (cleans addresses, removes watermarks, duplicates, spam tags)
+- Robust Phone Normalization (+91, spaces, dashes, parentheses, zero prefix)
+- Premium Cyber/Terminal UI Aesthetic with inline buttons
 """
 
 import os
@@ -9,12 +14,19 @@ import time
 import html
 import requests
 import telebot
+from telebot import types
 from dotenv import load_dotenv
 
 load_dotenv()
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-API_URL = os.environ.get("API_URL", "https://nmdllpezcocquamhgpmb.supabase.co/functions/v1/lookup?number=").strip()
+API_URL = os.environ.get(
+    "API_URL", 
+    "https://nmdllpezcocquamhgpmb.supabase.co/functions/v1/lookup?number="
+).strip()
+
+# Comma-separated channel usernames or IDs, e.g. "@mychannel1, @mychannel2" or "-100123456789"
+CHANNELS_RAW = os.environ.get("FORCE_CHANNELS", "").strip()
 
 if not BOT_TOKEN:
     print("[WARN] BOT_TOKEN is not set! Set BOT_TOKEN in environment or .env file.")
@@ -22,31 +34,72 @@ if not BOT_TOKEN:
 bot = telebot.TeleBot(BOT_TOKEN if BOT_TOKEN else "DUMMY_TOKEN")
 
 
+def get_required_channels():
+    """Parses FORCE_CHANNELS environment variable into a clean list of channels."""
+    if not CHANNELS_RAW:
+        return []
+    channels = []
+    for ch in CHANNELS_RAW.split(","):
+        ch = ch.strip()
+        if ch:
+            if not ch.startswith("@") and not ch.startswith("-"):
+                ch = "@" + ch
+            channels.append(ch)
+    return channels
+
+
+def check_user_membership(user_id):
+    """
+    Checks if the user has joined all required channels.
+    Returns: (is_all_joined: bool, unjoined_channels: list)
+    """
+    channels = get_required_channels()
+    if not channels:
+        return True, []
+
+    unjoined = []
+    for ch in channels:
+        try:
+            member = bot.get_chat_member(ch, user_id)
+            # Valid statuses: creator, administrator, member, restricted (if can read)
+            if member.status not in ["creator", "administrator", "member", "restricted"]:
+                unjoined.append(ch)
+        except Exception as e:
+            print(f"[WARN] Error checking membership in {ch}: {e}")
+            # If bot is not admin or channel username is invalid, avoid blocking user
+            pass
+
+    return len(unjoined) == 0, unjoined
+
+
+def make_force_sub_markup(unjoined_channels):
+    """Generates inline buttons for unjoined channels + Verify button."""
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for idx, ch in enumerate(unjoined_channels, 1):
+        clean_name = ch.replace("@", "")
+        url = f"https://t.me/{clean_name}"
+        markup.add(types.InlineKeyboardButton(f"📢 Join Channel {idx} ({ch})", url=url))
+
+    markup.add(types.InlineKeyboardButton("🔄 Verify & Continue", callback_data="check_join"))
+    return markup
+
+
 def clean_phone(val):
+    """Normalizes any phone input into a standard 10-digit Indian mobile number."""
     if not val:
         return ""
-    # Strip everything except digits
     digits = re.sub(r"\D", "", str(val).strip())
     if not digits:
         return ""
 
-    # 12 digits starting with 91 (e.g. +91 6392551618 -> 6392551618)
     if len(digits) == 12 and digits.startswith("91"):
         return digits[2:]
-
-    # 11 digits starting with 0 (e.g. 06392551618 -> 6392551618)
     if len(digits) == 11 and digits.startswith("0"):
         return digits[1:]
-
-    # 10 digits standard
     if len(digits) == 10:
         return digits
-
-    # More than 10 digits starting with 91
     if len(digits) > 10 and digits.startswith("91"):
         return digits[2:12]
-
-    # Fallback to last 10 digits
     if len(digits) >= 10:
         return digits[-10:]
 
@@ -55,11 +108,10 @@ def clean_phone(val):
 
 def extract_clean_records(data):
     """
-    Unwraps nested JSON response, filters out spam/watermark tags,
-    cleans up formatting and removes duplicate records.
+    Unwraps deeply nested response JSON, scrubs watermarks,
+    formats address, and deduplicates identical records.
     """
     cur = data
-    # Traverse through nested dicts
     while isinstance(cur, dict):
         if "result" in cur:
             cur = cur["result"]
@@ -78,7 +130,6 @@ def extract_clean_records(data):
         if not isinstance(item, dict):
             continue
 
-        # Extract primary fields
         num = item.get("num") or item.get("mobile") or item.get("phone") or ""
         name = item.get("name") or item.get("customer_name") or ""
         fname = item.get("fname") or item.get("father") or item.get("father_name") or ""
@@ -87,13 +138,12 @@ def extract_clean_records(data):
         id_val = item.get("aadhar") or item.get("id") or ""
         addr = item.get("address") or ""
 
-        # Deduplicate identical records
         uid = f"{num}-{name}-{id_val}"
         if uid in seen and uid != "--":
             continue
         seen.add(uid)
 
-        # Clean address: replace '!' with ', ' and normalize spaces
+        # Scrub formatting from address
         if addr:
             addr = re.sub(r"[!]+", ", ", addr)
             addr = re.sub(r"\s+", " ", addr).strip(", ")
@@ -113,20 +163,74 @@ def extract_clean_records(data):
 
 @bot.message_handler(commands=["start", "help"])
 def send_welcome(message):
+    user_id = message.from_user.id
+    is_joined, unjoined = check_user_membership(user_id)
+
+    if not is_joined:
+        text = (
+            "🚨 <b>Access Restricted!</b>\n\n"
+            "To use this bot, you must join our official channel(s) first.\n"
+            "After joining, click the <b>'Verify & Continue'</b> button below."
+        )
+        bot.reply_to(message, text, reply_markup=make_force_sub_markup(unjoined), parse_mode="HTML")
+        return
+
     text = (
-        "🤖 <b>Number Lookup Bot is Live!</b>\n\n"
-        "Send any mobile number in any format:\n"
+        "⚡ <b>WELCOME TO NUMBER INTELLIGENCE BOT</b> ⚡\n"
+        "──────────────────────────\n"
+        "Send any 10-digit Indian mobile number to look up real-time details:\n\n"
         "• <code>6392551618</code>\n"
         "• <code>+91 63925 51618</code>\n"
         "• <code>91-6392551618</code>\n"
         "• <code>06392551618</code>\n\n"
-        "💡 <i>Bot automatically removes spaces, +91, and cleans input!</i>"
+        "🛡️ <i>Auto-cleaning enabled: spaces, +91, dashes are stripped automatically!</i>"
     )
     bot.reply_to(message, text, parse_mode="HTML")
 
 
+@bot.callback_query_handler(func=lambda call: call.data == "check_join")
+def handle_verify_callback(call):
+    user_id = call.from_user.id
+    is_joined, unjoined = check_user_membership(user_id)
+
+    if is_joined:
+        bot.answer_callback_query(call.id, "✅ Verified successfully! You can now use the bot.", show_alert=True)
+        try:
+            bot.edit_message_text(
+                "✅ <b>Verification Successful!</b>\n\nSend me any mobile number to start searching.",
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+    else:
+        bot.answer_callback_query(call.id, "❌ You haven't joined all channels yet! Please join to continue.", show_alert=True)
+        try:
+            bot.edit_message_reply_markup(
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                reply_markup=make_force_sub_markup(unjoined)
+            )
+        except Exception:
+            pass
+
+
 @bot.message_handler(func=lambda msg: True)
 def handle_number(message):
+    user_id = message.from_user.id
+    
+    # 1. Enforce Channel Membership before EVERY search
+    is_joined, unjoined = check_user_membership(user_id)
+    if not is_joined:
+        text = (
+            "⚠️ <b>Channel Membership Required!</b>\n\n"
+            "You have either left or not joined our required channel(s).\n"
+            "Please join them and click <b>Verify & Continue</b>."
+        )
+        bot.reply_to(message, text, reply_markup=make_force_sub_markup(unjoined), parse_mode="HTML")
+        return
+
     raw = message.text.strip()
     phone = clean_phone(raw)
 
@@ -140,21 +244,44 @@ def handle_number(message):
 
     target_api = API_URL
     if not target_api:
-        bot.reply_to(message, "⚠️ API_URL environment variable is not configured.", parse_mode="HTML")
+        bot.reply_to(message, "⚠️ API_URL is not configured in environment.", parse_mode="HTML")
         return
+
+    # 2. Cyber Animated Loading Progress Message
+    loading_frames = [
+        "<code>[■□□□□□□□□□] 10%</code>\n🛡️ <b>VALIDATING NUMBER...</b>",
+        "<code>[■■■■□□□□□□] 40%</code>\n🔍 <b>SCANNING DATABASE...</b>",
+        "<code>[■■■■■■■□□□] 75%</code>\n⚡ <b>FETCHING RECORDS...</b>",
+        "<code>[■■■■■■■■■■] 100%</code>\n✨ <b>DECRYPTING DATA...</b>"
+    ]
+
+    loading_msg = bot.reply_to(message, loading_frames[0], parse_mode="HTML")
+    t0 = time.time()
+
+    # Async progress update simulation
+    try:
+        time.sleep(0.5)
+        bot.edit_message_text(loading_frames[1], chat_id=message.chat.id, message_id=loading_msg.message_id, parse_mode="HTML")
+    except Exception:
+        pass
 
     lookup_url = target_api if target_api.endswith("=") else f"{target_api}?number="
     full_url = f"{lookup_url}{phone}"
 
-    t0 = time.time()
     try:
         res = requests.get(full_url, timeout=15)
         elapsed = round(time.time() - t0, 2)
 
+        try:
+            bot.edit_message_text(loading_frames[3], chat_id=message.chat.id, message_id=loading_msg.message_id, parse_mode="HTML")
+        except Exception:
+            pass
+
         if res.status_code != 200:
-            bot.reply_to(
-                message,
+            bot.edit_message_text(
                 f"❌ <b>API Error:</b> HTTP {res.status_code}\n<i>Response Time: {elapsed}s</i>",
+                chat_id=message.chat.id,
+                message_id=loading_msg.message_id,
                 parse_mode="HTML"
             )
             return
@@ -163,58 +290,61 @@ def handle_number(message):
         records = extract_clean_records(data)
 
         if not records:
-            bot.reply_to(
-                message,
-                f"🔍 <b>No Record Found!</b>\nQuery: <code>{html.escape(phone)}</code>\n<i>Response Time: {elapsed}s</i>",
+            bot.edit_message_text(
+                f"🔍 <b>NO RECORDS FOUND!</b>\n\n"
+                f"📱 Query: <code>{html.escape(phone)}</code>\n"
+                f"No matching subscriber details found in the database.\n"
+                f"⚡ <i>Response Time: {elapsed}s</i>",
+                chat_id=message.chat.id,
+                message_id=loading_msg.message_id,
                 parse_mode="HTML"
             )
             return
 
-        response_text = "📱 <b>NUMBER INFO</b>\n"
-        response_text += f"Query: <code>{html.escape(phone)}</code>\n"
-        response_text += f"Records: <b>{len(records)}</b>\n"
-        response_text += "──────────────────────────\n"
+        # 3. Formatted Cyber Terminal UI
+        response_text = "╭━━━〔 📱 <b>NUMBER INTELLIGENCE</b> 〕━━━╮\n"
+        response_text += f"┃ 🎯 <b>Query:</b> <code>{html.escape(phone)}</code>\n"
+        response_text += f"┃ 📊 <b>Records Found:</b> <code>{len(records)}</code>\n"
+        response_text += "╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
 
         for idx, item in enumerate(records, 1):
-            if len(records) > 1:
-                response_text += f"\n📋 <b>RECORD {idx}/{len(records)}</b>\n"
-
-            if item["num"]:
-                response_text += f"📱 <b>Number:</b> <code>{html.escape(str(item['num']))}</code>\n"
+            response_text += f"┌─── <b>RECORD #{idx}</b> ───────────────\n"
             if item["name"]:
-                response_text += f"👤 <b>Name:</b> {html.escape(str(item['name']))}\n"
+                response_text += f"│ 👤 <b>NAME:</b> <code>{html.escape(str(item['name'])).upper()}</code>\n"
             if item["fname"]:
-                response_text += f"👨‍👦 <b>Father:</b> {html.escape(str(item['fname']))}\n"
+                response_text += f"│ 👨‍👦 <b>FATHER:</b> <code>{html.escape(str(item['fname'])).title()}</code>\n"
+            if item["num"]:
+                response_text += f"│ 📱 <b>MOBILE:</b> <code>{html.escape(str(item['num']))}</code>\n"
             if item["alt"]:
-                response_text += f"📞 <b>Alt Num:</b> <code>{html.escape(str(item['alt']))}</code>\n"
+                response_text += f"│ 📞 <b>ALT NUM:</b> <code>{html.escape(str(item['alt']))}</code>\n"
             if item["circle"]:
-                response_text += f"🌐 <b>Circle:</b> {html.escape(str(item['circle']))}\n"
+                response_text += f"│ 🌐 <b>CIRCLE:</b> <code>{html.escape(str(item['circle']))}</code>\n"
             if item["id"]:
-                response_text += f"🪪 <b>ID:</b> <code>{html.escape(str(item['id']))}</code>\n"
+                response_text += f"│ 🪪 <b>CAF / ID:</b> <code>{html.escape(str(item['id']))}</code>\n"
             if item["address"]:
-                response_text += f"🏠 <b>Address:</b> {html.escape(str(item['address']))}\n"
+                response_text += f"│ 🏠 <b>ADDRESS:</b>\n│    <i>{html.escape(str(item['address']))}</i>\n"
+            response_text += "└────────────────────────\n\n"
 
-        response_text += "──────────────────────────\n"
-        response_text += f"⚡ <i>Response Time: {elapsed}s</i>"
+        response_text += f"🚀 <b>RESPONSE TIME:</b> <code>{elapsed}s</code>\n"
+        response_text += "🛡️ <b>STATUS:</b> <code>VERIFIED & DECRYPTED</code>"
 
-        # Telegram message length safety
-        if len(response_text) <= 4000:
-            bot.reply_to(message, response_text, parse_mode="HTML")
-        else:
-            for chunk in [response_text[i:i+3800] for i in range(0, len(response_text), 3800)]:
-                bot.reply_to(message, chunk, parse_mode="HTML")
+        bot.edit_message_text(
+            response_text,
+            chat_id=message.chat.id,
+            message_id=loading_msg.message_id,
+            parse_mode="HTML"
+        )
 
     except requests.exceptions.Timeout:
-        bot.reply_to(message, "⏱️ <b>Timeout:</b> API took too long to respond. Please try again.", parse_mode="HTML")
+        bot.edit_message_text("⏱️ <b>Timeout Error:</b> Server took more than 15s to respond.", chat_id=message.chat.id, message_id=loading_msg.message_id, parse_mode="HTML")
     except Exception as e:
-        # Never break with parse_mode on unexpected errors
-        clean_err = html.escape(str(e))
-        bot.reply_to(message, f"⚠️ <b>Error:</b> {clean_err}", parse_mode="HTML")
+        bot.edit_message_text(f"⚠️ <b>Error:</b> {html.escape(str(e))}", chat_id=message.chat.id, message_id=loading_msg.message_id, parse_mode="HTML")
 
 
 if __name__ == "__main__":
     if not BOT_TOKEN:
-        print("[ERROR] BOT_TOKEN is missing. Set it in .env or environment variables.")
+        print("[ERROR] BOT_TOKEN is missing. Set it in .env or Railway environment variables.")
     else:
-        print("🤖 Clean Lookup Bot is starting polling...")
-        bot.infinity_polling(timeout=20, long_polling_timeout=15)
+        channels = get_required_channels()
+        print(f"🤖 Bot starting... Active Force-Sub Channels: {channels or 'None'}")
+        bot.infinity_polling(timeout=25, long_polling_timeout=20)
