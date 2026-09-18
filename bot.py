@@ -86,16 +86,14 @@ def make_force_sub_markup(unjoined_channels):
 
 
 def get_welcome_text():
-    """Clean standard Welcome text."""
+    """Short, sleek, premium cyber welcome screen."""
     return (
-        "⚡ <b>WELCOME TO NUMBER INTELLIGENCE BOT</b> ⚡\n"
-        "──────────────────────────\n"
-        "Send any 10-digit Indian mobile number to look up real-time details:\n\n"
-        "• <code>6392551618</code>\n"
-        "• <code>+91 63925 51618</code>\n"
-        "• <code>91-6392551618</code>\n"
-        "• <code>06392551618</code>\n\n"
-        "🛡️ <i>Auto-cleaning enabled: spaces, +91, dashes are stripped automatically!</i>"
+        "╭━━━〔 ⚡ <b>NUMBER INTELLIGENCE</b> 〕━━━╮\n"
+        "┃  🛡️ <b>STATUS:</b> <code>ONLINE & READY</code>\n"
+        "╰━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        "👋 <b>Welcome!</b> Send any mobile number to search:\n"
+        "💡 <b>Example:</b> <code>6392551618</code> <i>(or with +91)</i>\n\n"
+        "⚡ <i>Auto-formats country code & spaces instantly.</i>"
     )
 
 
