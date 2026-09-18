@@ -1,13 +1,13 @@
 """
 Premium High-Performance Lookup Telegram Bot for Railway Deployment.
 Features:
-- Smart Channel Leave Detection: Only asks to join the SPECIFIC channel(s) the user left or hasn't joined.
-- Dynamic Multi-Channel Force-Sub via ENV (supports any number of channels).
-- Seamless Verification: On 'Verify & Continue', instantly replaces the join message with the full clean Welcome screen.
-- Animated Cyber Loading Progress Bar while fetching records.
-- Automatic Data Sanitization (cleans addresses, removes watermarks, duplicates, spam tags).
-- Robust Phone Normalization (+91, spaces, dashes, parentheses, zero prefix).
-- Conflict Free (auto-resets stuck webhooks).
+- Anonymous Clean Channel Buttons: Shows '📢 Join Channel 1', '📢 Join Channel 2' (Never exposes real usernames in buttons)
+- Clean Auto-Delete on Verify: Removes force-sub alert messages completely for a fresh clean chat UI
+- Dynamic Multi-Channel Force-Sub via ENV (supports any number of channels)
+- Smart Channel Leave Tracking: Re-prompts only for unjoined channels
+- Animated Cyber Loading Progress Bar
+- Deep JSON Sanitization & Anti-Spam (Strips @tags, credits, watermarks, duplicate records)
+- Robust Phone Normalization (+91, spaces, dashes, brackets, leading zero)
 """
 
 import os
@@ -27,7 +27,7 @@ API_URL = os.environ.get(
     "https://nmdllpezcocquamhgpmb.supabase.co/functions/v1/lookup?number="
 ).strip()
 
-# Comma-separated channel usernames or IDs, e.g. "@mychannel1, @mychannel2"
+# Comma-separated channel usernames or IDs, e.g. "@channel1, @channel2"
 CHANNELS_RAW = os.environ.get("FORCE_CHANNELS", "").strip()
 
 if not BOT_TOKEN:
@@ -53,40 +53,43 @@ def get_required_channels():
 def check_user_membership(user_id):
     """
     Checks if the user has joined all required channels.
-    Returns: (is_all_joined: bool, unjoined_channels: list)
+    Returns: (is_all_joined: bool, unjoined_channels: list of (channel_index, channel_username))
     """
-    channels = get_required_channels()
-    if not channels:
+    all_channels = get_required_channels()
+    if not all_channels:
         return True, []
 
     unjoined = []
-    for ch in channels:
+    for idx, ch in enumerate(all_channels, 1):
         try:
             member = bot.get_chat_member(ch, user_id)
             if member.status not in ["creator", "administrator", "member", "restricted"]:
-                unjoined.append(ch)
+                unjoined.append((idx, ch))
         except Exception as e:
             print(f"[WARN] Error checking membership in {ch}: {e}")
-            # If bot has permissions issue, avoid blocking user permanently
             pass
 
     return len(unjoined) == 0, unjoined
 
 
 def make_force_sub_markup(unjoined_channels):
-    """Generates inline buttons for ONLY the channels the user has NOT joined."""
+    """
+    Generates inline buttons for unjoined channels.
+    Button text shows clean anonymous labels: '📢 Join Channel 1', '📢 Join Channel 2'.
+    Real usernames are NEVER displayed in the button label.
+    """
     markup = types.InlineKeyboardMarkup(row_width=1)
-    for idx, ch in enumerate(unjoined_channels, 1):
+    for idx, ch in unjoined_channels:
         clean_name = ch.replace("@", "")
         url = f"https://t.me/{clean_name}"
-        markup.add(types.InlineKeyboardButton(f"📢 Join Channel ({ch})", url=url))
+        markup.add(types.InlineKeyboardButton(f"📢 Join Channel {idx}", url=url))
 
     markup.add(types.InlineKeyboardButton("🔄 Verify & Continue", callback_data="check_join"))
     return markup
 
 
 def get_welcome_text():
-    """Short, sleek, premium cyber welcome screen."""
+    """Ultra-sleek, short, and premium cyber welcome screen."""
     return (
         "╭━━━〔 ⚡ <b>NUMBER INTELLIGENCE</b> 〕━━━╮\n"
         "┃  🛡️ <b>STATUS:</b> <code>ONLINE & READY</code>\n"
@@ -99,7 +102,6 @@ def get_welcome_text():
 
 # ─────────────────────────────────────────────────────────────
 # REAL-TIME CHANNEL LEAVE DETECTION
-# Triggers immediately when a user leaves any channel
 # ─────────────────────────────────────────────────────────────
 @bot.chat_member_handler()
 def handle_chat_member_update(update: types.ChatMemberUpdated):
@@ -108,26 +110,24 @@ def handle_chat_member_update(update: types.ChatMemberUpdated):
         new_status = update.new_chat_member.status
         user = update.new_chat_member.user
 
-        # If user left or was removed from channel
+        # User left or was kicked from channel
         if old_status in ["member", "administrator", "restricted"] and new_status in ["left", "kicked"]:
-            chat_title = update.chat.title or update.chat.username or "channel"
-            
-            # Check exactly which channels are unjoined right now
             is_joined, unjoined = check_user_membership(user.id)
             if is_joined:
                 return
 
             if len(unjoined) == 1:
+                channel_idx = unjoined[0][0]
                 alert_text = (
-                    f"🚨 <b>Alert! You left {html.escape(str(chat_title))}!</b>\n\n"
-                    f"Your bot access is paused because you are not in <b>{unjoined[0]}</b>.\n"
-                    "Please re-join this channel and click <b>Verify & Continue</b>."
+                    "🚨 <b>Channel Alert!</b>\n\n"
+                    f"Your bot access is paused because you left <b>Channel {channel_idx}</b>.\n"
+                    "Please re-join below and tap <b>Verify & Continue</b>."
                 )
             else:
                 alert_text = (
-                    f"🚨 <b>Alert! You left {html.escape(str(chat_title))}!</b>\n\n"
-                    f"You have <b>{len(unjoined)} channels</b> pending to join.\n"
-                    "Please join all pending channels below and click <b>Verify & Continue</b>."
+                    "🚨 <b>Channel Alert!</b>\n\n"
+                    f"You have <b>{len(unjoined)} pending channel(s)</b> to join.\n"
+                    "Please join below and tap <b>Verify & Continue</b>."
                 )
 
             try:
@@ -150,16 +150,17 @@ def send_welcome(message):
 
     if not is_joined:
         if len(unjoined) == 1:
+            ch_idx = unjoined[0][0]
             text = (
-                "🚨 <b>Channel Membership Required!</b>\n\n"
-                f"You need to join <b>{unjoined[0]}</b> before using this bot.\n"
-                "After joining, click <b>Verify & Continue</b> below."
+                "🚨 <b>Access Restricted!</b>\n\n"
+                f"Please join <b>Channel {ch_idx}</b> to use this bot.\n"
+                "After joining, tap <b>Verify & Continue</b> below."
             )
         else:
             text = (
                 "🚨 <b>Access Restricted!</b>\n\n"
-                f"You have <b>{len(unjoined)} channels</b> pending to join.\n"
-                "Please join them and click <b>Verify & Continue</b> below."
+                f"You need to join <b>{len(unjoined)} channels</b> to continue.\n"
+                "Please join below and tap <b>Verify & Continue</b>."
             )
         bot.reply_to(message, text, reply_markup=make_force_sub_markup(unjoined), parse_mode="HTML")
         return
@@ -174,29 +175,32 @@ def handle_verify_callback(call):
 
     if is_joined:
         bot.answer_callback_query(call.id, "✅ Verified successfully!", show_alert=False)
+        # Delete the old join/alert message completely for a clean fresh chat UI
         try:
-            # Instantly transform the message into the full Welcome screen and remove all buttons
-            bot.edit_message_text(
-                get_welcome_text(),
-                chat_id=call.message.chat.id,
-                message_id=call.message.message_id,
-                parse_mode="HTML"
-            )
+            bot.delete_message(chat_id=call.message.chat.id, message_id=call.message.message_id)
         except Exception:
             pass
+
+        # Send fresh welcome screen
+        bot.send_message(
+            call.message.chat.id,
+            get_welcome_text(),
+            parse_mode="HTML"
+        )
     else:
-        # User still has pending channels
-        pending_str = ", ".join(unjoined)
+        # Still unjoined channels exist
+        unjoined_labels = [f"Channel {idx}" for idx, _ in unjoined]
+        pending_str = ", ".join(unjoined_labels)
         bot.answer_callback_query(
             call.id, 
-            f"❌ You haven't joined: {pending_str}\nPlease join to continue!", 
+            f"❌ Please join: {pending_str} to continue!", 
             show_alert=True
         )
         try:
             text = (
                 "⚠️ <b>Action Incomplete!</b>\n\n"
                 f"You still need to join: <b>{pending_str}</b>\n"
-                "Please join below and click <b>Verify & Continue</b>."
+                "Please join below and tap <b>Verify & Continue</b>."
             )
             bot.edit_message_text(
                 text,
@@ -263,6 +267,7 @@ def extract_clean_records(data):
             continue
         seen.add(uid)
 
+        # Clean address formatting
         if addr:
             addr = re.sub(r"[!]+", ", ", addr)
             addr = re.sub(r"\s+", " ", addr).strip(", ")
@@ -284,14 +289,15 @@ def extract_clean_records(data):
 def handle_number(message):
     user_id = message.from_user.id
     
-    # 1. Check membership before processing any search query
+    # 1. Enforce channel membership before searching
     is_joined, unjoined = check_user_membership(user_id)
     if not is_joined:
-        pending_str = ", ".join(unjoined)
+        unjoined_labels = [f"Channel {idx}" for idx, _ in unjoined]
+        pending_str = ", ".join(unjoined_labels)
         text = (
             "⚠️ <b>Channel Membership Required!</b>\n\n"
-            f"You must be in <b>{pending_str}</b> to search numbers.\n"
-            "Please join below and click <b>Verify & Continue</b>."
+            f"You must join <b>{pending_str}</b> to search numbers.\n"
+            "Please join below and tap <b>Verify & Continue</b>."
         )
         bot.reply_to(message, text, reply_markup=make_force_sub_markup(unjoined), parse_mode="HTML")
         return
@@ -312,11 +318,11 @@ def handle_number(message):
         bot.reply_to(message, "⚠️ API_URL is not configured in environment.", parse_mode="HTML")
         return
 
-    # 2. Animated Progress Bar
+    # 2. Sleek Cyber Progress Animation
     loading_frames = [
         "<code>[■□□□□□□□□□] 10%</code>\n🛡️ <b>VALIDATING NUMBER...</b>",
-        "<code>[■■■■□□□□□□] 40%</code>\n🔍 <b>SCANNING DATABASE...</b>",
-        "<code>[■■■■■■■□□□] 75%</code>\n⚡ <b>FETCHING RECORDS...</b>",
+        "<code>[■■■■□□□□□□] 45%</code>\n🔍 <b>SCANNING DATABASE...</b>",
+        "<code>[■■■■■■■□□□] 80%</code>\n⚡ <b>FETCHING RECORDS...</b>",
         "<code>[■■■■■■■■■■] 100%</code>\n✨ <b>DECRYPTING DATA...</b>"
     ]
 
